@@ -1,0 +1,609 @@
+Map.centerObject(AOI, 8.5);
+var styling = {color: '000000', fillColor: '00000000'};
+Map.addLayer(AOI.style(styling), {}, 'study area', false); 
+
+////////////////////////////////////////////////////
+
+// The critical point is that adjusting BGW to control bareland
+
+var Year = 1995; 
+// malfunctional year of water confusion: 2011, 2010, 2009, 2008, 2005, 2004, 2003, 2002, 2001, 2000, 1999
+// need to adjust bgw: 2007-
+// gap year: 1994
+// wrong year: 1993, 1992, 1991, 1990, (attention: 1989), 1988, 1987, 1986, 1985, 1984, 1983
+var mappingYear = ee.Number(Year);
+
+print('current mapping year: ', 'Liaohe Basin in ' + Year);
+
+var pre_year = mappingYear.subtract(ee.Number(1));
+var pos_year = mappingYear.add(ee.Number(1));
+
+var pre_doy_grow = ee.Number(190);
+var pos_doy_grow = ee.Number(250);
+
+var pre_doy_wither = ee.Number(110);//135  // these definition is used for mapping forest extent
+var pos_doy_wither = ee.Number(170);//185
+
+var pre_doy_rice = ee.Number(135); // these definition is used for mapping rice extent
+var pos_doy_rice = ee.Number(185);
+
+var cloud_cover = 30;
+var control_cloud_cover = ee.Number(cloud_cover);
+
+////////////////////////////////////////////////////
+
+var maskSRClouds = function(image) {
+  var cloudShadowBitMask = ee.Number(2).pow(3).int();
+  var cloudsBitMask = ee.Number(2).pow(5).int();
+  //var waterBitMask = ee.Number(2).pow(2).int();
+  var qa = image.select('pixel_qa');
+  var mask = qa.bitwiseAnd(cloudShadowBitMask).eq(0)
+              .and(qa.bitwiseAnd(cloudsBitMask).eq(0));
+  return image.updateMask(mask);//.divide(10000);
+  };
+  
+/////////////////////////////////////////////////////////////
+
+var otsu = function(histogram) {
+  
+  var counts = ee.Array(ee.Dictionary(histogram).get('histogram'));
+  var means = ee.Array(ee.Dictionary(histogram).get('bucketMeans'));
+  var size = means.length().get([0]);
+  var total = counts.reduce(ee.Reducer.sum(), [0]).get([0]);
+  var sum = means.multiply(counts).reduce(ee.Reducer.sum(), [0]).get([0]);
+  var mean = sum.divide(total);
+  var indices = ee.List.sequence(1, size);
+  var bss = indices.map(function(i) {
+    
+    var aCounts = counts.slice(0, 0, i);
+    var aCount = aCounts.reduce(ee.Reducer.sum(), [0]).get([0]);
+    var aMeans = means.slice(0, 0, i);
+    var aMean = aMeans.multiply(aCounts)
+                      .reduce(ee.Reducer.sum(), [0]).get([0])
+                      .divide(aCount);
+    var bCount = total.subtract(aCount);
+    var bMean = sum.subtract(aCount.multiply(aMean)).divide(bCount);
+    
+    return aCount.multiply(aMean.subtract(mean).pow(2)).add(
+      bCount.multiply(bMean.subtract(mean).pow(2)));
+    
+  });
+  
+  return means.sort(bss).get([-1]);
+  
+  };
+
+//////////////////////////////////////////////////////////////
+
+var renameL457 = function(image){
+  var bandraw457 = ['B1', 'B2', 'B3', 'B4', 'B5', 'B7', 'B6' , 'pixel_qa'];
+  var bandnew457 = ['B', 'G', 'R', 'NIR', 'SWIR1', 'SWIR2', 'TEM', 'pixel_qa'];
+  return image.select(bandraw457).rename(bandnew457);
+};
+  
+var renameL8 = function(image){
+  var bandraw8 = ['B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B10',  'pixel_qa'];
+  var bandnew8 = ['B', 'G', 'R', 'NIR', 'SWIR1', 'SWIR2',  'TEM', 'pixel_qa'];
+  return image.select(bandraw8).rename(bandnew8);
+};
+
+// see 10.1371journal.pone.0147121
+var coefficients = ee.Array([
+  [0.2043, 0.4158, 0.5524, 0.5741, 0.3124, 0.2303],
+  [-0.1603, 0.2819, -0.4934, 0.7940, -0.0002, -0.1446],
+  [0.0315, 0.2021, 0.3102, 0.1594, -0.6806, -0.6109]
+]);
+
+//////////////////////////////////////////////////////////////////
+
+var collection_l4 = L4SR.filterBounds(AOI)
+                        .filter(ee.Filter.calendarRange(pre_year, pos_year, 'year'))
+                        .map(renameL457)
+                        .map(maskSRClouds);
+                        
+var collection_l5 = L5SR.filterBounds(AOI)
+                        .filter(ee.Filter.calendarRange(pre_year, pos_year, 'year'))
+                        .map(renameL457)
+                        .map(maskSRClouds);
+
+var collection_l7 = L7SR.filterBounds(AOI)
+                        .filter(ee.Filter.calendarRange(pre_year, pos_year, 'year'))
+                        .map(renameL457)
+                        .map(maskSRClouds);
+                        
+var collection_l8 = L8SR.filterBounds(AOI)
+                        .filter(ee.Filter.calendarRange(pre_year, pos_year, 'year'))
+                        .map(renameL8)
+                        .map(maskSRClouds);
+
+var image_collection_30 = collection_l4.merge(collection_l5)
+                                       .merge(collection_l7)
+                                       .merge(collection_l8)
+                                       //.map(maskSRClouds)
+                                       .filter(ee.Filter.lt('CLOUD_COVER', control_cloud_cover))
+                                       .filter(ee.Filter.calendarRange(pre_year, pos_year, 'year'))
+                                       .sort('DATE_ACQUIRED');
+
+//print('image used:', image_collection_30);
+
+var visParams = {bands: ['SWIR1', 'NIR', 'R'], min: 0, max: 3000, gamma: 1.4};
+
+var image30_grow_pre = image_collection_30.filter(ee.Filter.dayOfYear(pre_doy_grow, pos_doy_grow))
+                                      .median()
+                                      .clip(AOI);
+                                      
+var image30_grow = image30_grow_pre.select(['B', 'G', 'R', 'NIR', 'SWIR1', 'SWIR2']);
+
+Map.addLayer(image30_grow, visParams, 'example Growing Image', false);
+
+var image30_wither_pre = image_collection_30.filter(ee.Filter.dayOfYear(pre_doy_wither, pos_doy_wither))
+                                        .mean()
+                                        //.median()
+                                        .clip(AOI);
+
+var image30_wither = image30_wither_pre.select(['B', 'G', 'R', 'NIR', 'SWIR1', 'SWIR2']);
+Map.addLayer(image30_wither, visParams, 'example Withering Image', false);
+
+var image30_rice_pre = image_collection_30.filter(ee.Filter.dayOfYear(pre_doy_rice, pos_doy_rice))
+                                        .mean()
+                                        //.median()
+                                        .clip(AOI);
+
+var image30_rice = image30_rice_pre.select(['B', 'G', 'R', 'NIR', 'SWIR1', 'SWIR2']);
+Map.addLayer(image30_rice, visParams, 'example Watering Image', false);
+
+///////////////////////////////////////////////////////////////////////////////////
+
+var NDVI30_grow = image30_grow.normalizedDifference(['NIR', 'R']).rename('ndvi');
+
+var MNDWI30_grow = image30_grow.normalizedDifference(['G', 'SWIR2']).rename('mndwi');
+
+var LSWI30_grow = image30_grow.normalizedDifference(['NIR', 'SWIR2']).rename('lswi');
+
+var SAVI30_grow = image30_grow.expression(
+  '((A - B) / (A + B + 0.5)) * 1.5',
+  {
+    'A': image30_grow.select('NIR'),
+    'B': image30_grow.select('R')
+  }).rename('savi');
+
+var BAI30_grow = image30_grow.expression(
+  '((TM3 + TM5) - (TM1 +TM2 + TM7)) / ((TM3 + TM5) + (TM1 +TM2 + TM7))',
+  {
+    'TM1': image30_grow.select('B'),
+    'TM2': image30_grow.select('G'),
+    'TM3': image30_grow.select('R'),
+    'TM5': image30_grow.select('SWIR1'),
+    'TM7': image30_grow.select('SWIR2'),
+  }).rename('bai');
+
+var NDVI30_wither = image30_wither.normalizedDifference(['NIR', 'R']).rename('ndvi');
+
+//var MNDWI30_wither = image30_wither.normalizedDifference(['G', 'SWIR1']).rename('mndwi');
+
+var MNDWI30_wither = image30_wither.normalizedDifference(['G', 'SWIR2']).rename('mndwi');
+
+var LSWI30_wither = image30_wither.normalizedDifference(['NIR', 'SWIR2']).rename('lswi');
+
+var SAVI30_wither = image30_wither.expression(
+  '((A - B) / (A + B + 0.5)) * 1.5',
+  {
+    'A': image30_wither.select('NIR'),
+    'B': image30_wither.select('R')
+  }).rename('savi');
+
+var BAI30_wither = image30_wither.expression(
+  '((TM3 + TM5) - (TM1 +TM2 + TM7)) / ((TM3 + TM5) + (TM1 +TM2 + TM7))',
+  {
+    'TM1': image30_wither.select('B'),
+    'TM2': image30_grow.select('G'),
+    'TM3': image30_wither.select('R'),
+    'TM5': image30_wither.select('SWIR1'),
+    'TM7': image30_wither.select('SWIR2'),
+  }).rename('bai');
+
+var MNDWI30_rice = image30_rice.normalizedDifference(['G', 'SWIR2']).rename('mndwi');
+
+/////////////////////////////////////////////////////////////////////////////////////
+
+var arrayImage1D = image30_grow.toArray();
+var arrayImage2D = arrayImage1D.toArray(1);
+var componentsImage = ee.Image(coefficients)
+  .matrixMultiply(arrayImage2D)
+  .arrayProject([0])
+  .arrayFlatten(
+    [['brightness', 'greenness', 'wetness']]);
+
+var vizParams = {
+  bands: ['brightness', 'greenness', 'wetness'],
+  min: -0.1, max: [0.5, 0.1, 0.1]
+};
+
+//Map.addLayer(componentsImage, vizParams, 'components', false);
+
+var BGW30_grow = componentsImage.expression(
+  '((0.4 * brightness) + (0.5 * greenness) + (0.1 * wetness))',
+  {
+    'brightness': componentsImage.select('brightness'),
+    'greenness': componentsImage.select('greenness'),
+    'wetness': componentsImage.select('wetness')
+  }).rename('bgw');
+
+
+//Map.addLayer(BGW30_grow, {min: 1800, max: 2990, palette: ["ff0000","ffa500","fbff00","3fff00","002bff"]}, 'BGW30_grow', false);
+
+
+var arrayImage1D_wither = image30_wither.toArray();
+var arrayImage2D_wither = arrayImage1D_wither.toArray(1);
+
+var componentsImage_wither = ee.Image(coefficients)
+  .matrixMultiply(arrayImage2D_wither)
+  .arrayProject([0])
+  .arrayFlatten(
+    [['brightness', 'greenness', 'wetness']]);
+
+var BGW30_wither = componentsImage_wither.expression(
+  '((0.4 * brightness) + (0.5 * greenness) + (0.1 * wetness))',
+  {
+    'brightness': componentsImage_wither.select('brightness'),
+    'greenness': componentsImage_wither.select('greenness'),
+    'wetness': componentsImage_wither.select('wetness')
+  }).rename('bgw');
+
+Map.addLayer(BGW30_wither, {min: 1000, max: 3000, palette: ["ff0000","ffa500","fbff00","3fff00","002bff"]}, 'BGW30_wither', false);
+
+var BGW_bare_mask = BGW30_wither.gte(2500);
+var BGW_bare_area = BGW_bare_mask.selfMask().rename('testBare');
+
+//Map.addLayer(BGW_bare_area, {palette: '000000'}, 'BGW_bare_area', false);
+
+//var BGW_change = BGW30_wither.subtract(BGW30_grow).rename('bgw');
+
+//var BGW_change = (BGW30_wither.subtract(BGW30_grow)).divide(BGW30_wither.add(BGW30_grow)).rename('bgw');
+
+//Map.addLayer(BGW_change, {min: -1400, max: 800, palette: ["ff0000","ffa500","fbff00","3fff00","002bff"]}, 'BGW_change', true);
+
+//Map.addLayer(BGW_change, {min: -0.3, max: 0.15, palette: ["ff0000","ffa500","fbff00","3fff00","002bff"]}, 'BGW_change', false);
+
+//var rice_bgw_mask = BGW_change.lt(-0.20);
+//var rice_bgw_area = rice_bgw_mask.selfMask().rename('rice');
+//Map.addLayer(rice_bgw_area, {palette: '000000'}, 'rice_bgw_area', true);
+
+/*
+print(ui.Chart.image.histogram(
+  {
+    image: BGW_change,
+    region: AOI,
+    scale: 900
+  }));
+*/  
+
+/////////////////////////////////////////////////////////////////////////////////////
+
+//Map.addLayer(SAVI30_grow, {min:0.0, max: 1.2, palette: ["ff0000","ffa500","fbff00","3fff00","002bff"]}, 'SAVI30_grow', false);
+//Map.addLayer(NDVI30_grow, {min:0.0, max: 1.0, palette: ["ff0000","ffa500","fbff00","3fff00","002bff"]}, 'NDVI30_grow', false);
+//Map.addLayer(BAI30_grow, {min:-0.1, max: 0.2, palette: ["ff0000","ffa500","fbff00","3fff00","002bff"]}, 'BAI30_grow', false);
+Map.addLayer(MNDWI30_grow, {min:-0.5, max: 0.5, palette: ["ff0000","ffa500","fbff00","3fff00","002bff"]}, 'MNDWI30_grow', false);
+//Map.addLayer(LSWI30_grow, {palette: ["ff0000","ffa500","fbff00","3fff00","002bff"]}, 'LSWI30_grow', false);
+
+//Map.addLayer(SAVI30_wither, {min:0.0, max: 1.2, palette: ["ff0000","ffa500","fbff00","3fff00","002bff"]}, 'SAVI30_wither', false);
+//Map.addLayer(NDVI30_wither, {palette: ["ff0000","ffa500","fbff00","3fff00","002bff"]}, 'NDVI30_wither', false);
+//Map.addLayer(BAI30_wither, {min:-0.1, max: 0.2, palette: ["ff0000","ffa500","fbff00","3fff00","002bff"]}, 'BAI30_wither', false);
+//Map.addLayer(MNDWI30_wither, {palette: ["ff0000","ffa500","fbff00","3fff00","002bff"]}, 'MNDWI30_wither', false);
+//Map.addLayer(LSWI30_wither, {palette: ["ff0000","ffa500","fbff00","3fff00","002bff"]}, 'LSWI30_wither', false);
+
+////////////////////////////////////////////////////////////////////////////////////////////////
+
+var FVC = NDVI30_grow.expression(
+  '((ndvi-bare)/(veg-bare))*((ndvi-bare)/(veg-bare))',
+  {
+    'ndvi': NDVI30_grow.select('ndvi'),
+    'bare': ee.Number(0.20), // 0.20// 0.05
+    'veg' : ee.Number(0.86)  // 0.86// 0.70
+  }).rename('fvc');
+
+var a = ee.Number(0.004);
+var b = ee.Number(0.986);
+
+var Emissivity = FVC.multiply(a).add(b).rename('emm');
+var Thermal = image30_grow_pre.select('TEM').multiply(0.1).rename('lst');
+
+var LST = Thermal.expression(
+  '(THE/(1 + (0.00115 * (THE/1.438))*log(emm))) - 273.15',
+  {
+    'THE': Thermal.select('lst'),
+    'emm': Emissivity.select('emm')
+  }).rename('lst');
+
+Map.addLayer(LST, {min: 20, max: 30, palette: ['0014ff', '00dcff', 'efff00', 'ff9900', 'ff0000']}, 'LST', false);
+
+////////////////////////////////////////////////////////////////////////////////////////////////
+
+// vagetation/ non vegetation
+
+var His_ndvi_grow = NDVI30_grow.reduceRegion(
+  {
+    reducer: ee.Reducer.histogram(), 
+    geometry: AOI, 
+    scale: 600,
+    maxPixels: 1e13,
+    tileScale: 16
+  });
+
+var Threshold_ndvi_grow = otsu(His_ndvi_grow.get('ndvi'));
+print('Threshold_ndvi_grow_otsu: ', ee.Number(Threshold_ndvi_grow));
+//var Threshold_ndvi_grow = ee.Number();  // used for adjusting
+var vegetation_mask = NDVI30_grow.gte(ee.Number(Threshold_ndvi_grow));
+var non_vegetation_mask = NDVI30_grow.lt(ee.Number(Threshold_ndvi_grow));
+var vegetation_area = vegetation_mask.selfMask().rename('vegetation');
+
+//Map.addLayer(vegetation_area, {palette: '00ff2b'}, 'vegetation', false);
+
+//////////////////////////////////////////////////////////////////////////////////////////////////
+
+// water
+
+var His_mndwi_grow = MNDWI30_grow.reduceRegion(
+  {
+    reducer: ee.Reducer.histogram(), 
+    geometry: AOI, 
+    scale: 900,
+    maxPixels: 1e13,
+    tileScale: 16
+  });
+
+//var Threshold_mndwi_grow = otsu(His_mndwi_grow.get('mndwi'));
+//var water_mask = MNDWI30_grow.gte(ee.Number(Threshold_mndwi_grow)).and(non_vegetation_mask);
+//var non_water_mask = water_mask.not();
+//var non_water_mask = MNDWI30_grow.lt(ee.Number(Threshold_mndwi_grow));
+//var water_area = water_mask.selfMask().rename('water');
+
+var water_mask = MNDWI30_grow.gte(0.50).and(non_vegetation_mask);
+var non_water_mask = MNDWI30_grow.lt(0.50);
+var water_area = water_mask.selfMask().rename('water');
+
+//print('water OTSU: ', Threshold_mndwi_grow);
+
+//Map.addLayer(water_area, {palette: '002bff'}, 'water', false);
+
+/////////////////////////////////////////////////////////////////////////////////////////////////
+
+// forest/ cropland
+
+var His_ndvi_wither = NDVI30_wither.reduceRegion(
+  {
+    reducer: ee.Reducer.histogram(), 
+    geometry: AOI, 
+    scale: 600,
+    maxPixels: 1e13,
+    tileScale: 16
+  });
+
+var Threshold_ndvi_wither = otsu(His_ndvi_wither.get('ndvi'));
+var forest_mask = NDVI30_wither.gte(ee.Number(Threshold_ndvi_wither)).and(vegetation_mask);
+var non_forest_mask = NDVI30_wither.lt(ee.Number(Threshold_ndvi_wither));
+var forest_area = forest_mask.selfMask().rename('forest');
+
+//Map.addLayer(forest_area, {palette: '00ff2b'}, 'forest', false);
+
+var cropland_mask = non_forest_mask.and(vegetation_mask);
+var cropland_area = cropland_mask.selfMask().rename('cropland');
+
+//Map.addLayer(cropland_area, {palette: 'fff700'}, 'cropland', false);
+
+///////////////////////////////////////////////////////////////////////////////////////
+
+// rice paddy/ dryland (both belonging to cropland)
+
+var His_mndwi_rice = MNDWI30_rice.reduceRegion(
+  {
+    reducer: ee.Reducer.histogram(), 
+    geometry: AOI, 
+    scale: 600,
+    maxPixels: 1e13,
+    tileScale: 16
+  });
+
+var Threshold_mndwi_rice = otsu(His_mndwi_rice.get('mndwi'));
+
+/*
+var ricepaddy_mask = MNDWI30_rice.gte(ee.Number(Threshold_mndwi_rice)).and(cropland_mask);
+var non_ricepaddy_mask = MNDWI30_rice.lt(ee.Number(Threshold_mndwi_rice));
+var ricepaddy_area = ricepaddy_mask.selfMask().rename('ricepaddy');
+
+//Map.addLayer(ricepaddy_area, {palette: '3a932a'}, 'rice paddy', false);
+
+var dryland_mask = non_ricepaddy_mask.and(cropland_mask);
+var dryland_area = dryland_mask.selfMask().rename('dryland');
+
+//Map.addLayer(dryland_area, {palette: 'fff700'}, 'dryland', false);
+*/
+/////////////////////////////////////////////////////////////////////////////////////
+
+// built-up land (needs mod)
+
+var indexMix30 = NDVI30_grow.addBands(MNDWI30_grow).addBands(LSWI30_grow);
+var indexMix30_img = indexMix30.expression(
+  '(0.3 * A) + (0.2 * B) + (0.5 * C)',
+  {
+    'A': indexMix30.select('ndvi'),
+    'B': indexMix30.select('mndwi'),
+    'C': indexMix30.select('lswi')
+  }).rename('mix');
+
+var His_indexMix30 = indexMix30_img.reduceRegion(
+  {
+    reducer: ee.Reducer.histogram(), 
+    geometry: AOI, 
+    scale: 600,
+    maxPixels: 1e13,
+    tileScale: 16
+  });
+
+var Threshold_indexMix30 = otsu(His_indexMix30.get('mix'));
+var builtup_mask_pre = indexMix30_img.lt(ee.Number(Threshold_indexMix30)).and(non_vegetation_mask).and(non_water_mask);
+
+//Map.addLayer(builtup_mask_pre.selfMask(), {palette: '000000'}, 'builtup_mask_pre', false);
+
+var builtup_mask_pre_not = indexMix30_img.gte(ee.Number(Threshold_indexMix30)).and(non_vegetation_mask).and(non_water_mask);
+var builtup_mask_pre_not_area = builtup_mask_pre_not.selfMask().rename('bgw');
+
+//Map.addLayer(builtup_mask_pre_not_area, {palette: '000000'}, 'builtup_mask_pre_not_area', false);  // used for filling gap
+
+///////////////////////////////////////////////////////////////////////////////////////
+
+var viirs_light = VIIRS.filter(ee.Filter.date('2018-01-01', '2018-12-31')).select('avg_rad').max().clip(AOI);
+Map.addLayer(viirs_light, {}, 'viirs_light', false);
+
+var viirs_light_mask = viirs_light.gte(0.85); // impervious should be located in this extent
+var viirs_light_mask_bare = viirs_light.lt(0.85); // used for bareland mapping
+
+var viirs_light_area = viirs_light_mask.selfMask().rename('light');
+Map.addLayer(viirs_light_area, {palette: 'FF0000', opacity: 0.3}, 'viirs_light_area', false);
+
+//////////////////////////////////////////////////////////////////////////////////////
+
+// bareland
+
+var threshold_bgw = ee.Number(2100);
+// the threshold of BGW should be changed according to temporal shifts
+
+var bareland_mask = BGW30_wither.gt(threshold_bgw).and(builtup_mask_pre).and(viirs_light_mask_bare);
+
+var bareland_area = bareland_mask.selfMask().rename('bareland');
+
+//Map.addLayer(bareland_area, {palette: '000000'}, 'bareland_area', false);
+
+//////////////////////////////////////////////////////////////////////////////////////
+
+// grassland
+
+var BGW_grass_mask = BGW30_wither.gt(1950).and(BGW30_wither.lte(threshold_bgw));
+var grass_mask = BGW_grass_mask.and(builtup_mask_pre).and(viirs_light_mask_bare);
+var grass_area = grass_mask.selfMask().rename('grass');
+
+//Map.addLayer(grass_area, {palette: '91ff00'}, 'grass_area', false);
+
+// built up supplement (BGW < 1900)
+
+var builtup_bgw_supplement_mask = BGW30_wither.lte(1950).and(builtup_mask_pre).and(viirs_light_mask_bare);
+var builtup_bgw_supplement_area = builtup_bgw_supplement_mask.selfMask().rename('builtup');
+
+
+// builtup exclude water
+
+var builtup_mask = viirs_light_mask.and(builtup_mask_pre);
+var builtup_area = builtup_mask.selfMask().rename('builtup');
+//Map.addLayer(builtup_area, {palette: 'FF0000'}, 'built-up', false);
+
+//////////////////////////////////////////////////////////////////////////////////////////
+
+//////////////////////////////////////////////////////////////////////////////////////
+
+{
+  var mosaic = ee.ImageCollection(
+    [
+      forest_area.visualize({palette: '2CC44D'}),  // 1
+      grass_area.visualize({palette: '91FF00'}),   // 2
+      water_area.visualize({palette: '00DCFF'}),   // 3
+      //ricepaddy_area.visualize({palette: '3A932A'}),
+      cropland_area.visualize({palette: 'FFF000'}),  // 4
+      //dryland_area.visualize({palette: 'FFF000'}), 
+      builtup_area.visualize({palette: 'FF0000'}),   // 5
+      builtup_bgw_supplement_area.visualize({palette: 'FF0000'}),  // 5
+      bareland_area.visualize({palette: '000000'}),  // 6
+      builtup_mask_pre_not_area.visualize({palette: '91FF00'}) // contemporarily insert to grass // 2
+    ]).mosaic();
+    
+  Map.addLayer(mosaic, {}, 'Visualization mosaic', true);
+}
+
+////////////////////////////////////////////////////////////////////////////////////////
+
+Export.image.toDrive(
+  {
+    image: forest_area,
+    description: 'forest_area_' + Year,
+    folder: 'landCover_' + Year,
+    region: AOI,
+    scale: 30,
+    crs: 'EPSG: 4326',
+    maxPixels: 1e13
+  });
+  
+Export.image.toDrive(
+  {
+    image: grass_area,
+    description: 'grass_area_' + Year,
+    folder: 'landCover_' + Year,
+    region: AOI,
+    scale: 30,
+    crs: 'EPSG: 4326',
+    maxPixels: 1e13
+  });
+  
+Export.image.toDrive(
+  {
+    image: water_area,
+    description: 'water_area_' + Year,
+    folder: 'landCover_' + Year,
+    region: AOI,
+    scale: 30,
+    crs: 'EPSG: 4326',
+    maxPixels: 1e13
+  });
+  
+Export.image.toDrive(
+  {
+    image: cropland_area,
+    description: 'cropland_area_' + Year,
+    folder: 'landCover_' + Year,
+    region: AOI,
+    scale: 30,
+    crs: 'EPSG: 4326',
+    maxPixels: 1e13
+  });
+  
+Export.image.toDrive(
+  {
+    image: builtup_area,
+    description: 'builtup_area_' + Year,
+    folder: 'landCover_' + Year,
+    region: AOI,
+    scale: 30,
+    crs: 'EPSG: 4326',
+    maxPixels: 1e13
+  });
+  
+Export.image.toDrive(
+  {
+    image: builtup_bgw_supplement_area,
+    description: 'builtup_area_sp_' + Year,
+    folder: 'landCover_' + Year,
+    region: AOI,
+    scale: 30,
+    crs: 'EPSG: 4326',
+    maxPixels: 1e13
+  });
+  
+Export.image.toDrive(
+  {
+    image: bareland_area,
+    description: 'bareland_area_' + Year,
+    folder: 'landCover_' + Year,
+    region: AOI,
+    scale: 30,
+    crs: 'EPSG: 4326',
+    maxPixels: 1e13
+  });
+  
+Export.image.toDrive(
+  {
+    image: builtup_mask_pre_not_area,
+    description: 'grass_area_sp_' + Year,
+    folder: 'landCover_' + Year,
+    region: AOI,
+    scale: 30,
+    crs: 'EPSG: 4326',
+    maxPixels: 1e13
+  });
